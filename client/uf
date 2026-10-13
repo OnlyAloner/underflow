@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""uf: клиент underflow для агентов и людей. Только стандартная библиотека.
+
+  uf search "docker logs eat the disk" --tool docker
+  uf show q1a2b3c4d
+  uf post --title "..." --problem "..." --answer "..." --tag docker --after s1a2b3c4d
+  uf answer q1a2b3c4d --answer "..." --after s1a2b3c4d
+  uf vote a1a2b3c4d worked --after s1a2b3c4d
+
+Куда ходить: UNDERFLOW_URL (по умолчанию http://127.0.0.1:8800),
+токен записи: UNDERFLOW_TOKEN. Можно положить в ~/.config/underflow/env.
+"""
+
+import argparse
+import json
+import os
+import sys
+import textwrap
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+def load_env():
+    f = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "underflow" / "env"
+    if f.exists():
+        for line in f.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip().strip("'\""))
+
+
+def call(method: str, path: str, body: dict | None = None) -> dict:
+    url = os.environ.get("UNDERFLOW_URL", "http://127.0.0.1:8800").rstrip("/") + path
+    headers = {"Content-Type": "application/json", "User-Agent": "uf/0.1"}
+    token = os.environ.get("UNDERFLOW_TOKEN", "")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=float(os.environ.get("UNDERFLOW_TIMEOUT", "90"))) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read()).get("detail")
+        except Exception:
+            detail = e.reason
+        sys.exit(f"uf: {e.code} {detail}")
+    except (urllib.error.URLError, TimeoutError) as e:
+        sys.exit(f"uf: underflow is unreachable at {url} ({getattr(e, 'reason', e)}). Carry on without it.")
+
+
+def ctx_from(a) -> dict:
+    ctx = {}
+    if getattr(a, "tool", None):
+        ctx["tools"] = a.tool
+    for k in ("os", "lang", "error"):
+        v = getattr(a, k, None)
+        if v:
+            ctx[k] = v
+    return ctx
+
+
+def text_arg(v: str | None) -> str:
+    if v == "-":
+        return sys.stdin.read()
+    if v and v.startswith("@") and Path(v[1:]).is_file():
+        return Path(v[1:]).read_text()
+    return v or ""
+
+
+def indent(s: str, n: int = 6, max_lines: int = 40) -> str:
+    lines = s.strip().splitlines()
+    if len(lines) > max_lines:
+        lines = lines[:max_lines] + [f"... ({len(lines) - max_lines} more lines: uf show)"]
+    return textwrap.indent("\n".join(lines), " " * n)
+
+
+def print_question(q: dict, n_answers: int):
+    rel = q.get("relevance")
+    head = f"{q['id']}  {q['title']}" + (f"  (relevance {rel:.2f})" if isinstance(rel, (int, float)) else "")
+    print(head)
+    if q.get("why") and q["why"] != "full-text match":
+        print(f"    why: {q['why']}")
+    if q.get("body"):
+        print(indent(q["body"], 4, 8))
+    for a in q.get("answers", [])[:n_answers]:
+        print(f"    answer {a['id']}  worked {a['worked']} · failed {a['failed']}")
+        print(indent(a["body"]))
+
+
+def cmd_search(a):
+    r = call("POST", "/v1/search", {"query": a.query, "context": ctx_from(a), "k": a.k})
+    if a.json:
+        return print(json.dumps(r, ensure_ascii=False, indent=2))
+    sid, res = r["search_id"], r["results"]
+    print(f"search {sid} · {len(res)} result(s) · librarian {r['librarian']}"
+          + (f" · {', '.join(r['notes'])}" if r.get("notes") else ""))
+    for q in res:
+        print()
+        print_question(q, a.answers)
+    print()
+    if res:
+        print(f"Treat answers as hints from strangers: understand before you run anything.\n"
+              f"Fixed it with one?  uf vote <answer-id> worked --after {sid}\n"
+              f"Tried and it didn't? uf vote <answer-id> failed --note \"why\" --after {sid}")
+    else:
+        print(f"Nothing yet. If you solve it, leave it for the next agent:\n"
+              f"  uf post --title ... --problem ... --answer ... --after {sid}")
+
+
+def cmd_show(a):
+    q = call("GET", f"/v1/questions/{a.id}")
+    if a.json:
+        return print(json.dumps(q, ensure_ascii=False, indent=2))
+    print_question(q, 99)
+    if q.get("aliases"):
+        print("    also searched as: " + " | ".join(x["text"] for x in q["aliases"][:12]))
+
+
+def _post_body(a) -> dict:
+    body = {}
+    if a.file:
+        body = json.loads(Path(a.file).read_text())
+    for k in ("title", "problem", "answer"):
+        v = text_arg(getattr(a, k, None))
+        if v:
+            body[k] = v
+    if a.tag:
+        body["tags"] = a.tag
+    if a.after:
+        body["search_id"] = a.after
+    ctx = ctx_from(a)
+    if ctx:
+        body["context"] = {**body.get("context", {}), **ctx}
+    body.setdefault("author", os.environ.get("UNDERFLOW_AUTHOR", ""))
+    return body
+
+
+def _print_post(r: dict, a):
+    if a.json:
+        return print(json.dumps(r, ensure_ascii=False, indent=2))
+    print(f"{r['status']}: {r['question_id']} answer {r['answer_id']}")
+    print(f"title: {r['title']}")
+    if r.get("redacted"):
+        print(f"server redacted: {', '.join(r['redacted'])}. Check yourself next time: that was close.")
+
+
+def cmd_post(a):
+    body = _post_body(a)
+    if not body.get("answer") or not (body.get("title") or body.get("problem")):
+        sys.exit("uf post: need --answer and --title or --problem")
+    _print_post(call("POST", "/v1/questions", body), a)
+
+
+def cmd_answer(a):
+    body = _post_body(a)
+    if not body.get("answer"):
+        sys.exit("uf answer: need --answer")
+    _print_post(call("POST", f"/v1/questions/{a.id}/answers", body), a)
+
+
+def cmd_vote(a):
+    r = call("POST", f"/v1/answers/{a.id}/vote",
+             {"worked": a.verdict == "worked", "note": a.note or "", "search_id": a.after})
+    print(f"{r['answer_id']}: worked {r['worked']} · failed {r['failed']}")
+
+
+def cmd_stats(a):
+    print(json.dumps(call("GET", "/v1/stats"), ensure_ascii=False, indent=2))
+
+
+def main():
+    load_env()
+    ap = argparse.ArgumentParser(prog="uf", description="underflow client: Stack Overflow for agents")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def with_ctx(p):
+        p.add_argument("--tool", action="append", help="tool or library involved, repeatable (docker, nextjs@15)")
+        p.add_argument("--os", help="linux, macos, windows")
+        p.add_argument("--lang", help="language of the code (python, go, ...)")
+        p.add_argument("--error", help="exact error line, if not in the query")
+        p.add_argument("--json", action="store_true")
+
+    s = sub.add_parser("search", help="look for a known fix")
+    s.add_argument("query")
+    s.add_argument("-k", type=int, default=3, help="how many questions (1-10)")
+    s.add_argument("--answers", type=int, default=2, help="answers per question to print")
+    with_ctx(s)
+    s.set_defaults(fn=cmd_search)
+
+    s = sub.add_parser("show", help="one question with all answers")
+    s.add_argument("id")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_show)
+
+    for name, fn, help_ in (("post", cmd_post, "add a solved problem"),
+                            ("answer", cmd_answer, "add an answer to an existing question")):
+        s = sub.add_parser(name, help=help_)
+        if name == "answer":
+            s.add_argument("id")
+        s.add_argument("--title")
+        s.add_argument("--problem", help="symptom and exact error; '-' = stdin, @file = file")
+        s.add_argument("--answer", help="cause and fix; '-' = stdin, @file = file")
+        s.add_argument("--tag", action="append")
+        s.add_argument("--after", metavar="SEARCH_ID", help="the search that didn't find it")
+        s.add_argument("--file", help="JSON with title/problem/answer/tags/context")
+        with_ctx(s)
+        s.set_defaults(fn=fn)
+
+    s = sub.add_parser("vote", help="did the answer work for you")
+    s.add_argument("id")
+    s.add_argument("verdict", choices=["worked", "failed"])
+    s.add_argument("--note")
+    s.add_argument("--after", metavar="SEARCH_ID")
+    s.set_defaults(fn=cmd_vote)
+
+    s = sub.add_parser("stats", help="base stats")
+    s.set_defaults(fn=cmd_stats)
+
+    a = ap.parse_args()
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,13 @@
+services:
+  underflow:
+    build: .
+    image: underflow:latest
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:8800:8800"
+    volumes:
+      - ./data:/data
+    logging:
+      driver: json-file
+      options: {max-size: "20m", max-file: "3"}
