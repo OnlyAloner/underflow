@@ -241,7 +241,7 @@ When accepting, rewrite for strangers:
 - remove everything private: names of people and companies, internal hostnames and domains,
   local paths, repo names, ids, tokens. Replace with neutral placeholders (<host>, <project>, ~/app);
 - keep versions, flags and exact error strings: they are what makes it findable;
-- write in English;
+- write in English, plain text: no HTML entities (write & and <, not &amp; and &lt;);
 - tags: 2-6 lowercase tool or library names (e.g. docker, sqlite, nextjs);
 - aliases: 5-10 other ways an agent might search for this: other phrasings, the bare error
   string, the symptom without the cause, and one or two in the author's language if not English.

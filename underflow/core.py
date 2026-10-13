@@ -1,5 +1,6 @@
 """Что делает база, без HTTP: искать, принимать, голосовать, садовничать."""
 
+import html
 import json
 import logging
 import time
@@ -117,7 +118,7 @@ class Underflow:
         if curated:
             # и то, что вернула модель, проходит через регулярки ещё раз
             (c_title, c_problem, c_answer), more = scrub_many(
-                curated["title"], curated["problem"], curated["answer"])
+                *(html.unescape(curated[k]) for k in ("title", "problem", "answer")))
             redacted += [k for k in more if k not in redacted]
             aliases = [scrub(a)[0] for a in curated.get("aliases", [])]
             if title and title != c_title:
@@ -226,7 +227,8 @@ class Underflow:
                     self.db.reindex(q["id"])
                 done["removed"] += 1
                 return
-            (title, problem, answer), _ = scrub_many(cur["title"], cur["problem"], cur["answer"])
+            (title, problem, answer), _ = scrub_many(
+                *(html.unescape(cur[k]) for k in ("title", "problem", "answer")))
             ctx = json.loads(r["context"] or "{}")
             ctx["curated"] = True
             conn.execute("update answers set body=?, context=? where id=?",
